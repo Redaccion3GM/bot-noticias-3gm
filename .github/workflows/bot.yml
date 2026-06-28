@@ -1,0 +1,32 @@
+name: Bot Noticias Redaccion 3GM
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+    - cron: '43 11 * * *'
+    - cron: '08 15 * * *'
+    - cron: '31 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  publicar-noticias:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install anthropic feedparser
+
+      - name: Ejecutar bot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MYBB_USER: ${{ secrets.MYBB_USER }}
+          MYBB_PASS: ${{ secrets.MYBB_PASS }}
+        run: python bot.py
