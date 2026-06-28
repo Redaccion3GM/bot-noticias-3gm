@@ -4,7 +4,6 @@ import feedparser
 import anthropic
 import urllib.request
 import urllib.parse
-import json
 import time
 from datetime import datetime
 
@@ -41,25 +40,57 @@ FUENTES = [
     {"url": "https://asia.nikkei.com/rss/feed/nar", "nombre": "Nikkei Asia", "idioma": "ja"},
 ]
 
-SUBFOROS = {"conflictos": 7, "escenarios_3gm": 6, "oriente_medio": 8, "indo_pacifico": 9, "geopolitica": 10, "geoeconomia": 11, "armamento": 12, "inteligencia": 13, "historia_militar": 14, "noticias_dia": 15}
+SUBFOROS = {
+    "conflictos": 7, "escenarios_3gm": 6, "oriente_medio": 8,
+    "indo_pacifico": 9, "geopolitica": 10, "geoeconomia": 11,
+    "armamento": 12, "inteligencia": 13, "historia_militar": 14, "noticias_dia": 15,
+}
+
 MYBB_URL = "https://foro3gm.com"
 MYBB_USER = os.environ.get("MYBB_USER", "Redaccion3GM")
 MYBB_PASS = os.environ.get("MYBB_PASS", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+
+def extraer_imagen(entrada):
+    if hasattr(entrada, "media_content") and entrada.media_content:
+        for m in entrada.media_content:
+            url = m.get("url", "")
+            if url and any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]):
+                return url
+    if hasattr(entrada, "media_thumbnail") and entrada.media_thumbnail:
+        url = entrada.media_thumbnail[0].get("url", "")
+        if url:
+            return url
+    if hasattr(entrada, "enclosures") and entrada.enclosures:
+        for enc in entrada.enclosures:
+            if enc.get("type", "").startswith("image/"):
+                return enc.get("href", "")
+    resumen = entrada.get("summary", "") or entrada.get("content", [{}])[0].get("value", "")
+    if 'src="' in resumen:
+        partes = resumen.split('src="')
+        for parte in partes[1:]:
+            url = parte.split('"')[0]
+            if url.startswith("http") and any(ext in url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]):
+                if not any(p in url.lower() for p in ["icon", "logo", "avatar", "pixel", "1x1"]):
+                    return url
+    return ""
+
 
 def obtener_articulos():
     fuentes_hoy = random.sample(FUENTES, min(8, len(FUENTES)))
     articulos = []
     for fuente in fuentes_hoy:
         try:
-            import feedparser as fp
-            feed = fp.parse(fuente["url"])
+            feed = feedparser.parse(fuente["url"])
             if feed.entries:
                 entrada = random.choice(feed.entries[:10])
-                articulos.append({"titulo": entrada.get("title", ""), "resumen": entrada.get("summary", entrada.get("description", ""))[:2000], "link": entrada.get("link", ""), "fuente": fuente["nombre"], "idioma": fuente["idioma"]})
+                imagen = extraer_imagen(entrada)
+                articulos.append({"titulo": entrada.get("title", ""), "resumen": entrada.get("summary", entrada.get("description", ""))[:2000], "link": entrada.get("link", ""), "fuente": fuente["nombre"], "idioma": fuente["idioma"], "imagen": imagen})
         except Exception as e:
             print(f"Error con {fuente['nombre']}: {e}")
     return articulos
+
 
 def generar_post(articulo):
     cliente = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -69,12 +100,12 @@ def generar_post(articulo):
 
 {instruccion}
 
-Escribe un post para el foro con este formato:
+Escribe un post con este formato exacto:
 1. TITULO EN MAYUSCULAS (max 90 caracteres)
 2. Linea en blanco
 3. Cuerpo: 3-4 parrafos de analisis con perspectiva propia y contexto geopolitico
 4. Linea en blanco
-5. Pregunta de debate (empieza con "Debate:")
+5. Debate: [pregunta para los lectores]
 6. Dos lineas en blanco
 7. Fuente: {articulo['fuente']}
    Traduccion y elaboracion: Redaccion 3GM
@@ -83,9 +114,17 @@ Articulo:
 Titulo: {articulo['titulo']}
 Contenido: {articulo['resumen']}
 
-Escribe directamente el post sin comentarios previos."""
+Escribe directamente el post sin comentarios."""
     msg = cliente.messages.create(model="claude-sonnet-4-6", max_tokens=1000, messages=[{"role": "user", "content": prompt}])
     return msg.content[0].text
+
+
+def construir_cuerpo_con_imagen(texto_post, imagen_url):
+    if not imagen_url:
+        return texto_post
+    bloque_imagen = f'[center][img]{imagen_url}[/img][/center]\n\n'
+    return bloque_imagen + texto_post
+
 
 def determinar_subforo(titulo, cuerpo):
     texto = (titulo + " " + cuerpo).lower()
@@ -105,6 +144,7 @@ def determinar_subforo(titulo, cuerpo):
         return SUBFOROS["conflictos"]
     return SUBFOROS["noticias_dia"]
 
+
 def publicar_en_mybb(titulo, cuerpo, fid):
     sesion = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
     datos_login = urllib.parse.urlencode({"action": "do_login", "username": MYBB_USER, "password": MYBB_PASS, "submit": "Login"}).encode()
@@ -115,6 +155,7 @@ def publicar_en_mybb(titulo, cuerpo, fid):
     datos_post = urllib.parse.urlencode({"my_post_key": post_key, "subject": titulo[:85], "message": cuerpo, "fid": fid, "action": "do_newthread", "submit": "Post Thread"}).encode()
     resp = sesion.open(f"{MYBB_URL}/newthread.php?fid={fid}", datos_post)
     return resp.geturl()
+
 
 def main():
     print(f"Bot iniciado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -127,15 +168,15 @@ def main():
     publicados = 0
     for i, articulo in enumerate(articulos[:num_posts]):
         try:
-            print(f"[{i+1}/{num_posts}] {articulo['titulo'][:60]}... ({articulo['fuente']})")
+            tiene_imagen = "SI" if articulo["imagen"] else "NO"
+            print(f"[{i+1}/{num_posts}] {articulo['titulo'][:55]}... ({articulo['fuente']}) [img:{tiene_imagen}]")
             post = generar_post(articulo)
-            lineas = post.strip().split("
-")
+            lineas = post.strip().split("\n")
             titulo_post = lineas[0].strip()
-            cuerpo_post = "
-".join(lineas[1:]).strip()
-            fid = determinar_subforo(titulo_post, cuerpo_post)
-            url = publicar_en_mybb(titulo_post, cuerpo_post, fid)
+            cuerpo_post = "\n".join(lineas[1:]).strip()
+            cuerpo_final = construir_cuerpo_con_imagen(cuerpo_post, articulo["imagen"])
+            fid = determinar_subforo(titulo_post, cuerpo_final)
+            url = publicar_en_mybb(titulo_post, cuerpo_final, fid)
             print(f"  Publicado en subforo {fid}: {url}")
             publicados += 1
             if i < num_posts - 1:
@@ -145,6 +186,7 @@ def main():
         except Exception as e:
             print(f"  Error: {e}")
     print(f"Sesion completada: {publicados}/{num_posts} posts")
+
 
 if __name__ == "__main__":
     main()
